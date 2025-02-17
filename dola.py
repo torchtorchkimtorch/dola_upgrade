@@ -47,3 +47,14 @@ class DoLa:
         if self.device == "cuda" and self.num_gpus==1:
             model.cuda()
         return model, tokenizer
+
+    # 여기 아직 안했음 
+    def set_stop_words(self, stop_words):
+        self.stop_words = stop_words
+        self.stopping_criteria = StoppingCriteriaList()
+        list_stop_word_ids = []
+        for stop_word in self.stop_words:
+            stop_word_ids = self.tokenizer.encode('\n'+stop_word)[:3]
+            list_stop_word_ids.append(stop_word_ids)
+            print("Added stop word: ",stop_word, ' with the ids', stop_word_ids, flush=True)
+        
