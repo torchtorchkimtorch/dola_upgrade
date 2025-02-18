@@ -171,4 +171,21 @@ class DoLa:
                     kl2 = F.kl_div(log_softmax_premature_layers, M, reduction='none').mean(-1)
                     js_divs = 0.5 * (kl1+kl2)
                     js_divs = js_divs.mean(-1)
-                    
+                    premature_layer = candidate_premature_layers[int(js_divs.argmax().cpu.item())]
+                    premature_layer_dist[premature_layer] += 1
+
+                    premature_layers.append(premature_layer)
+                base_logits = torch.zeros_like(dict_outputs[mature_layer][0,prefix_ids.shape[-1]-1:-1])
+                for i, l in enumerate(premature_layers):
+                    base_logits[i] = dict_outputs[l][0, prefix_ids.shape[-1]-1 + i]
+                final_logits = dict_outputs[mature_layer][0,prefix_ids.shape[-1]-1:-1]
+                final_logits = final_logits.log_softmax(dim=-1)
+                base_logits = base_logits.log_softmax(dim=-1)
+                diff_logits = final_logits - base_logits
+                if post_softmax:
+                    diff_logits = diff_logits.log_softmax(dim=-1)
+                if relative_top >0.0:
+                    relative_top_mask = self.get_relative_top_filter(final_logits, relative_top)
+                    diff_logits = torch.where(relative_top_mask, relative_top_value, diff_logits)
+                log_probs = diff_logits[range(diff_logits.shape[0]), continue_ids].sum().item()
+        return log_probs, (premature_layer_dist if mode=='dola' else None)
