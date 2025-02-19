@@ -21,7 +21,7 @@ class DoLa:
         self.num_gpus = num_gpus
         self.stopping_criteria = None
         self.max_gpu_memory = max_gpu_memory
-        self.mode, self.tokenizer = self.load_model(model_name)
+        self.model, self.tokenizer = self.load_model(model_name)
 
     def load_model(self, model_name):
         if self.device == "cuda":
@@ -38,10 +38,10 @@ class DoLa:
                         "device_map": "auto",
                         "max_memory": {i:f"{self.max_gpu_memory}GiB" for i in range(self.num_gpus)},
                     })
-                elif self.device == "cpu":
-                    kwargs = {}
-                else:
-                    raise ValueError(f"Invalid device: {self.device}")
+        elif self.device == "cpu":
+            kwargs = {}
+        else:
+            raise ValueError(f"Invalid device: {self.device}")
         tokenizer = AutoTokenizer.from_pretrained(model_name if not 'vicuna' in model_name else 'huggyllama/llama-7b')
         model = AutoModelForCausalLM.from_pretrained(model_name,low_cpu_mem_usage=True,**kwargs)
         if self.device == "cuda" and self.num_gpus==1:
