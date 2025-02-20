@@ -7,7 +7,6 @@ import json
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM, LlamaTokenizer, AutoConfig
-from transformers.generation.stopping_criteria import StoppingCriteriaList, LLamaQaStoppingCriteria
 
 import argparse
 import warnings
@@ -19,16 +18,16 @@ class DoLa:
         self.model_name = model_name
         self.device = device
         self.num_gpus = num_gpus
-        self.stopping_criteria = None
         self.max_gpu_memory = max_gpu_memory
         self.model, self.tokenizer = self.load_model(model_name)
 
     def load_model(self, model_name):
         if self.device == "cuda":
             config = AutoConfig.from_pretrained(model_name)
-            # fix torch_dtype variable as automatical variable 
+            print(config)
             torch_dtype = getattr(config, "torch_dtype", torch.float16)
-            kwargs = {"torch_dtype":torch_dtype, "offload_folder": f"{model_name}/offload"}
+
+            kwargs = {"offload_folder": f"{model_name}/offload"}
             if self.num_gpus == "auto":
                 kwargs["device_map"] = "auto"
             else:
@@ -42,25 +41,12 @@ class DoLa:
             kwargs = {}
         else:
             raise ValueError(f"Invalid device: {self.device}")
-        tokenizer = AutoTokenizer.from_pretrained(model_name if not 'vicuna' in model_name else 'huggyllama/llama-7b')
-        model = AutoModelForCausalLM.from_pretrained(model_name,low_cpu_mem_usage=True,**kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModelForCausalLM.from_pretrained(model_name,low_cpu_mem_usage=True,torch_dtype=torch_dtype,**kwargs)
         if self.device == "cuda" and self.num_gpus==1:
             model.cuda()
         return model, tokenizer
 
-
-    # Class StoppingCriteria and LLamaQaStoppingCriteria need to be more specific and flexible
-    def set_stop_words(self, stop_words):
-        self.stop_words = stop_words
-        self.stopping_criteria = StoppingCriteriaList()
-        list_stop_word_ids = []
-        for stop_word in self.stop_words:
-            stop_word_ids = self.tokenizer.encode('\n'+stop_word)[:3]
-            list_stop_word_ids.append(stop_word_ids)
-            print("Added stop word: ",stop_word, ' with the ids', stop_word_ids, flush=True)
-        self.stopping_criteria.append(LLamaQaStoppingCriteria(list_stop_word_ids))
-    
-    # Modify the code to accept these arguments using argparse
     def generate(self, input_text, max_new_tokens=256, top_p=0.95, top_k=0, temperature=0.8, mature_layer=None, premature_layer=None, candidate_premature_layers=[], mode='baseline', verbose=True, remove_stop_words=False, relative_top=0.1, **kwargs):
         with torch.no_grad():
             input_ids = self.tokenizer(input_text, return_tensors="pt").input_ids.to(self.device)
@@ -69,15 +55,24 @@ class DoLa:
             if mode=="baseline":
                 outputs = self.model.generate(input_ids, max_length=max_len, num_return_sequences=1,
                 output_scores=True, return_dict_in_generate=True, dola_decoding=False,
-                top_p=top_p, top_k=top_k, temperature=temperature, stopping_criteria=self.stopping_criteria, **kwargs)
+                top_p=top_p, top_k=top_k, temperature=temperature, eos_token_id=self.tokenizer.eos_token_id, **kwargs)
 
             elif mode=="dola-static":
                 assert mature_layer is not None, "mature_layer must be specified"
                 assert premature_layer is not None, "premature_layer must be specified"
-                outputs = self.model_generate(input_ids, max_length=max_len, num_return_sequences=1,
+                outputs = self.model.generate(input_ids, max_length=max_len, num_return_sequences=1,
                 output_scores=True, return_dict_in_generate=True, dola_decoding=True,
-                top_p=top_p, top_k=top_k, temperature=temperature, stopping_criteria=self.stopping_criteria, relative_top=relative_top,
+                top_p=top_p, top_k=top_k, temperature=temperature, eos_token_id=self.tokenizer.eos_token_id, relative_top=relative_top,
                 mature_layer=mature_layer, premature_layer=None, candidate_premature_layers=candidate_premature_layers, **kwargs)
+                premature_layer_dist = outputs.premature_layer_dist
+            
+            elif mode == 'dola':
+                assert mature_layer is not None, "mature_layer must be specified"
+                assert candidate_premature_layers is not None, "candidate_premature_layers must be specified"
+                outputs = self.model.generate(input_ids, max_length=max_len, num_return_sequences=1,
+                                        output_scores=True, return_dict_in_generate=True, dola_decoding=True,
+                                        top_p=top_p, top_k=top_k, temperature=temperature, eos_token_id=self.tokenizer.eos_token_id, relative_top=relative_top, 
+                                        mature_layer=mature_layer, premature_layer=None, candidate_premature_layers=candidate_premature_layers, **kwargs,)
                 premature_layer_dist = outputs.premature_layer_dist
             sequences, scores = outputs.sequences, output.scores
 
@@ -101,17 +96,17 @@ class DoLa:
         
         return output_str, (premature_layer_dist if mode =='dola' else None)
     
-    def get_relative_top_filter(self, scores: torch.FloatTensor, relative_top_k: float = 0.1, min_tokens_to_keep: int=1):
+    def get_relative_top_filter(self, scores: torch.FloatTensor, relative_top: float = 0.1, min_tokens_to_keep: int=1):
         scores_normalized = scores.log_softmax(dim=-1)
         sorted_logits, sorted_indices = torch.sort(scores_normalized, descending=True)
         min_thresh = sorted_logits[..., min_tokens_to_keep-1]
         probs_max = torch.max(scores_normalized, dim=-1).values
-        probs_thresh = porbs_max + np.log(relative_top)
+        probs_thresh = probs_max + np.log(relative_top)
         probs_thresh = torch.min(min_thresh, probs_thresh)
         probs_thresh = probs_thresh.unsqueeze(-1)
         return scores_normalized < probs_thresh
 
-    def lm_score(self, input_text1, input_text2, pmi=False, max_new_tokens=256, top_p=0.95, top_k=0, temperature=0.8, mature_layer=None, premature_layer=None, candidate_premature_layer=[], mode="baseline", verbose=True, remove_stop_words=False, relative_top=0.1, relative_top_value=-1000.0, post_softmax=True, **kwargs):
+    def lm_score(self, input_text1, input_text2, pmi=False, max_new_tokens=256, top_p=0.95, top_k=0, temperature=0.8, mature_layer=None, premature_layer=None, candidate_premature_layers=[], mode="baseline", verbose=True, remove_stop_words=False, relative_top=0.1, relative_top_value=-1000.0, post_softmax=True, **kwargs):
         with torch.no_grad():
             input_text = input_text1 + input_text2
             input_ids = self.tokenizer(input_text, return_tensors="pt").input_ids.to(self.device)
@@ -154,24 +149,23 @@ class DoLa:
                     input_ids = input_ids,
                     return_dict = True,
                     output_attentions = False,
-                    ouput_hidden_states = False,
-                    early_Exit_layers = candidate_premature_layers + [mature_layer]
+                    output_hidden_states = False,
+                    early_exit_layers = candidate_premature_layers + [mature_layer]
                 )
-
                 for seq_i in range(prefix_ids.shape[-1]-1, input_ids.shape[-1]-1):
                     stacked_premature_layers = torch.stack([dict_outputs[i][:,seq_i,:] for i in candidate_premature_layers], dim=0)
                     softmax_mature_layer = F.softmax(dict_outputs[mature_layer][:,seq_i,:],dim=-1)
-                    softmax_premature_layer = F.softmax(stacked_premature_layers, dim=-1)
+                    softmax_premature_layers = F.softmax(stacked_premature_layers, dim=-1)
                     M = 0.5 * (softmax_mature_layer[None,:,:] + softmax_premature_layers)
 
                     log_softmax_mature_layer = F.log_softmax(dict_outputs[mature_layer][:,seq_i,:], dim=-1)
-                    log_softmax_premature_layer = F.log_softmax(stacked_premature_layers, dim=-1)
+                    log_softmax_premature_layers = F.log_softmax(stacked_premature_layers, dim=-1)
 
                     kl1 = F.kl_div(log_softmax_mature_layer[None, :, :], M, reduction='none').mean(-1)
                     kl2 = F.kl_div(log_softmax_premature_layers, M, reduction='none').mean(-1)
                     js_divs = 0.5 * (kl1+kl2)
                     js_divs = js_divs.mean(-1)
-                    premature_layer = candidate_premature_layers[int(js_divs.argmax().cpu.item())]
+                    premature_layer = candidate_premature_layers[int(js_divs.argmax().cpu().item())]
                     premature_layer_dist[premature_layer] += 1
 
                     premature_layers.append(premature_layer)

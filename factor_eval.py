@@ -104,7 +104,7 @@ def set_seed(seed):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-name", type=str, default="huggyllama/llama-7b")
+    parser.add_argument("--model-name", type=str)
     parser.add_argument("--num-gpus", type=str, default="1")
     parser.add_argument("--max_gpu_memory", type=int, default=40)
     parser.add_argument("--device", type=str, choices=["cuda","cpu"], default="cuda")
@@ -146,7 +146,6 @@ if __name__ == "__main__":
         list_data_dict = list_data_dict[:10]
     
     llm = DoLa(model_name, device, num_gpus, args.max_gpu_memory)
-    llm.set_stop_words(["Q: ","\end{code}"])
     early_exit_layers = [int(x) for x in args.early_exit_layers.split(",")]
     if len(early_exit_layers) == 1:
         print("MODE: naive decoding from the last layer",flush=True)
@@ -202,7 +201,7 @@ if __name__ == "__main__":
         if args.debug:
             print(f"log prob of answers: {answer_true_log_prob}", end=" ")
             for answer_false_log_prob in answer_false_log_probs:
-                print(f'{answer_flase_log_prob}', end=' ')
+                print(f'{answer_false_log_prob}', end=' ')
             print()
         is_cor=True
         for answer_false_log_prob in answer_false_log_probs:
@@ -221,7 +220,7 @@ if __name__ == "__main__":
         total_tokens = sum(premature_layer_dist.values())
         if total_tokens > 0:
             for l in candidate_premature_layers:
-                print('Premature layer {0} was used {1} times, {2}%'.format(1, premature_layer_dist[1], round(premature_layer_dist[l] / total_tokens * 100, 2)))
+                print('Premature layer {0} was used {1} times, {2}%'.format(l, premature_layer_dist[l], round(premature_layer_dist[l] / total_tokens * 100, 2)))
     
     model_tag = model_name.split('/')[-1] if model_name[-1] != '/' else model_name.split('/')[-2]
     output_file = args.output_path if args.shard_id is None else (args.output_path+"_"+str(args.shard_id)+".json")
